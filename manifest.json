@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "GIF Sender Whatsapp",
+  "name": "GIF Sender for WhatsApp",
   "version": "1.0.0",
   "description": "Drag And Drop or Select In UI to Convert and Prepare Animated GIFs and MP4s for sending. Fixes WhatsApp's failed GIF file detection.",
   "minimum_chrome_version": "106",
