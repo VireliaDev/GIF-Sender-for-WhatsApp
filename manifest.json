@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "GIF Sender Whatsapp",
+  "version": "1.0.0",
+  "description": "Drag And Drop or Select In UI to Convert and Prepare Animated GIFs and MP4s for sending. Fixes Whatsapps failed GIF file detection.",
+  "minimum_chrome_version": "106",
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["vendor/mp4-muxer.js", "encoder.js", "content.js"],
+      "run_at": "document_start"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page.js"
+      ],
+      "matches": [
+        "https://web.whatsapp.com/*"
+      ]
+    }
+  ]
+}
