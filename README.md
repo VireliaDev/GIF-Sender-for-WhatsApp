@@ -1,4 +1,4 @@
-# WhatsApp GIF Sender
+# GIF Sender for WhatsApp
 
 WhatsApp Web still doesn't let you upload GIFs properly. If you drag a GIF into the browser, it gets sent as a static frame instead of a looping GIF.
 
@@ -39,7 +39,7 @@ The Web Store version will automatically receive updates when new versions are r
 
 If you prefer to install the extension manually, or if the Chrome Web Store version is unavailable, you can download the latest release package here:
 
-[Download Latest Release](https://github.com/VireliaDev/GIF-Sender-WhatsApp/releases)
+[Download Latest Release](https://github.com/VireliaDev/GIF-Sender-for-WhatsApp/releases)
 
 To install manually:
 
@@ -53,4 +53,4 @@ The extension will then be installed locally in your browser.
 
 ## Disclaimer
 
-WhatsApp GIF Sender is an independent project and is not affiliated with WhatsApp or Meta.
+GIF Sender for WhatsApp is an independent project and is not affiliated with WhatsApp or Meta.
