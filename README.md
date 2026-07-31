@@ -23,3 +23,34 @@ Video conversion is performed using your own hardware, so for the best experienc
 * No accounts, no cloud processing, no data collection.
 
 **Working as of 31/07/2026.**
+
+
+## Installation
+
+### Chrome Web Store (Recommended)
+
+The easiest way to install WhatsApp GIF Sender is through the Chrome Web Store:
+
+[Chrome Web Store Link](https://chromewebstore.google.com/detail/pmkkmjjejbfbijgljkhjgbjampckkomp)
+
+The Web Store version will automatically receive updates when new versions are released.
+
+### Manual Installation
+
+If you prefer to install the extension manually, or if the Chrome Web Store version is unavailable, you can download the latest release package here:
+
+[Download Latest Release](https://github.com/VireliaDev/GIF-Sender-WhatsApp/releases)
+
+To install manually:
+
+1. Download and extract the ZIP file.
+2. Open Chromes's extension page at: `chrome://extensions`
+3. Enable **Developer mode**.
+4. Click **Load unpacked**.
+5. Select the extracted extension folder.
+
+The extension will then be installed locally in your browser.
+
+## Disclaimer
+
+WhatsApp GIF Sender is an independent project and is not affiliated with WhatsApp or Meta.
