@@ -53,4 +53,4 @@ The extension will then be installed locally in your browser.
 
 ## Disclaimer
 
-GIF Sender for WhatsApp is an independent project and is not affiliated with WhatsApp or Meta.
+GIF Sender for WhatsApp is an independent project and is not affiliated with, sponsored by, or endorsed by WhatsApp LLC or Meta Platforms, Inc.
