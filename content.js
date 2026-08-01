@@ -1,15 +1,16 @@
-// Content script (isolated world). Owns the UI: the floating GIF button, the
-// conversion panel, and the drag-and-drop interception. Converted files are
-// handed to page.js, which stages them in WhatsApp's media drawer — the user
-// always presses WhatsApp's own Send button; nothing is sent automatically.
+// Content script. Builds the extension's UI and intercepts file drops on
+// WhatsApp Web. Converted files are handed to page.js, which puts them in
+// WhatsApp's media drawer. Nothing is ever sent automatically; the user still
+// presses WhatsApp's own send button.
 
 (() => {
     if (window.__waGifContentLoaded) return;
     window.__waGifContentLoaded = true;
 
-    // ------------------------------------------------- WhatsApp page hook ----
-    // page.js must run in the page's main world to reach WhatsApp's modules,
-    // so it is injected as a real <script> tag rather than a content script.
+    // --- Page script ---
+
+    // page.js has to run in the page's own JS context to reach WhatsApp's
+    // modules, so it is added as a script tag rather than a content script.
     function injectPageScript() {
         const script = document.createElement("script");
         script.src = chrome.runtime.getURL("page.js");
@@ -18,7 +19,8 @@
     }
     injectPageScript();
 
-    // ------------------------------------------------------------------ UI ----
+    // --- UI ---
+
     const style = document.createElement("style");
     style.textContent = `
   #wa-gif-launch{position:fixed;right:18px;bottom:96px;z-index:2147483647;
@@ -62,13 +64,14 @@
     launchButton.textContent = "GIF";
     launchButton.title = "Send an animated GIF";
 
+    // Shown while a drag the extension will handle is over the page.
     const dropOverlay = document.createElement("div");
     dropOverlay.id = "wa-gif-drop";
     dropOverlay.innerHTML = "<span>Drop to add to chat</span>";
 
     const panel = document.createElement("div");
     panel.id = "wa-gif-panel";
-    panel.classList.add("notready"); // controls stay hidden until WhatsApp confirms
+    panel.classList.add("notready"); // controls stay hidden until page.js reports in
     panel.innerHTML = `
   <h3>Send GIF to this chat</h3>
   <input id="wa-gif-file" type="file" accept="image/gif,image/webp,image/apng,video/mp4,video/webm,video/quicktime" />
@@ -93,13 +96,12 @@
         (progressBarFill.style.width =
             Math.round(Math.max(0, Math.min(1, fraction)) * 100) + "%");
 
-    // True once page.js confirms WhatsApp's internal modules were found.
+    // Set once page.js confirms WhatsApp's modules were found.
     let whatsappReady = false;
 
     launchButton.addEventListener("click", () => panel.classList.toggle("open"));
 
-    // Choosing a file starts the conversion right away; the button stays as a
-    // manual retry.
+    // Picking a file starts the conversion. The button is only a manual retry.
     fileInput.addEventListener("change", () => {
         sendButton.disabled = !fileInput.files.length || !whatsappReady;
         setStatus("");
@@ -123,8 +125,9 @@
         }
     });
 
-    // -------------------------------------------------------------- errors ----
-    // Tagged so the UI can tell "your file was no good" from "WhatsApp moved".
+    // --- Errors ---
+
+    // The stage field tells the UI whether to blame the file or WhatsApp.
     class StageError extends Error {
         constructor(message) {
             super(message);
@@ -139,13 +142,15 @@
         }
     }
 
-    // ------------------------------------------------------------ convert ----
-    // encoder.js runs in this same isolated world and provides __waGifEncode.
-    // It cannot run in a Web Worker: WhatsApp Web's Content-Security-Policy
-    // (worker-src 'self' blob: data:) blocks workers loaded from extension URLs.
-    let cancelRequested = false;
-    let batchLabel = ""; // "File 2/3 — " while converting a multi-file drop
+    // --- Conversion ---
 
+    // encoder.js provides __waGifEncode in this same context. It cannot run in
+    // a Web Worker because WhatsApp's CSP (worker-src 'self' blob: data:)
+    // blocks workers loaded from extension URLs.
+    let cancelRequested = false;  // checked by the encoder between frames
+    let batchLabel = "";          // status prefix while converting several files
+
+    // Called by the encoder to update the status line and progress bar.
     function onProgress(phase, done, total) {
         if (phase === "mux") {
             setProgressBar(1);
@@ -156,6 +161,7 @@
         }
     }
 
+    // Converts one file and returns the result as an MP4 File.
     async function convertToMp4(file) {
         if (typeof __waGifEncode !== "function") {
             throw new ConvertError("internal", "converter didn't load — refresh the page");
@@ -174,11 +180,10 @@
         }
     }
 
-    // ---------------------------------------------------------------- flow ----
-    // Converts each file, then stages everything that succeeded in WhatsApp's
-    // media drawer. The file picker and the drop interceptor both end up here.
-    let isConverting = false;
+    let isConverting = false; // blocks new drops while a conversion runs
 
+    // Converts each file in turn, then stages the ones that succeeded.
+    // Both the file picker and the drop handler call this.
     async function convertAndStage(files) {
         if (!files || !files.length || isConverting) return;
         if (!whatsappReady) {
@@ -203,6 +208,7 @@
                 try {
                     converted.push(await convertToMp4(files[i]));
                 } catch (err) {
+                    // One bad file should not lose the rest of the batch.
                     if (cancelRequested) break;
                     failures.push(err);
                 }
@@ -244,6 +250,7 @@
         }
     }
 
+    // Picks the text to show in the status line for a failure.
     function errorMessage(err) {
         if (cancelRequested) return "Cancelled";
         if (!err) return "Something went wrong";
@@ -252,11 +259,13 @@
         return "Error: " + (err.message || String(err));
     }
 
-    // ------------------------------------------- hand back to WhatsApp ----
-    // A drag taken from a website can't be given back as a drop: WhatsApp
-    // ignores a drop it wasn't already watching. Pasting works instead, since
-    // WhatsApp accepts pasted pictures into the message box the same way it
-    // accepts dropped ones.
+    // --- Passing files to WhatsApp ---
+
+    // A drag taken from a website cannot be given back as a drop, because
+    // WhatsApp ignores a drop it was not already tracking. Pasting into the
+    // message box works instead.
+
+    // Tried in order. WhatsApp's markup changes between versions.
     const MESSAGE_BOX_SELECTORS = [
         'footer div[contenteditable="true"]',
         '[data-testid="conversation-compose-box-input"]',
@@ -264,17 +273,18 @@
         'div[contenteditable="true"]',
     ];
 
+    // Returns the visible message box, or null when no chat is open.
     function findMessageBox() {
         for (const selector of MESSAGE_BOX_SELECTORS) {
             for (const element of document.querySelectorAll(selector)) {
-                if (element.offsetParent !== null) return element; // visible one
+                if (element.offsetParent !== null) return element;
             }
         }
         return null;
     }
 
-    // Nothing touches the real clipboard; the paste is delivered straight to
-    // the message box, so whatever the user had copied stays untouched.
+    // Hands files to WhatsApp as a paste. The event is built here and sent
+    // straight to the message box, so the system clipboard is not touched.
     function pasteIntoMessageBox(files) {
         const messageBox = findMessageBox();
         if (!messageBox) return false;
@@ -291,7 +301,6 @@
 
     cancelButton.addEventListener("click", () => {
         if (!isConverting) return;
-        // The encoder checks this flag between frames and stops.
         cancelRequested = true;
         setStatus("Cancelling…");
     });
@@ -336,36 +345,37 @@
         panel.classList.remove("open");
     }
 
-    // ---------------------------------------------------- drop interception ----
-    // Capture-phase listeners registered at document_start fire before anything
-    // WhatsApp attaches, so this code sees every drag first.
-    //
-    // Two kinds of drag are handled. Dragging files off the computer puts real
-    // files on the drag; dragging a picture out of a web page puts only its
-    // web address, which has to be downloaded before it can be converted.
+    // --- Drop handling ---
 
+    // These listeners use the capture phase and are registered at
+    // document_start, so they run before WhatsApp's own handlers.
+    //
+    // Files dragged off the computer report their type during the drag. Files
+    // dragged from a website do not: their type is only readable once the drop
+    // happens, which is why some decisions are deferred until then.
+
+    // Fallback for files that arrive without a type.
     const MEDIA_EXTENSIONS = /\.(gif|webp|apng|png|mp4|webm|mov|m4v)(\?|#|$)/i;
 
-    // Formats worth taking over when they arrive from a website. Animated
-    // images and short clips only: static pictures are left to WhatsApp, which
-    // already handles them correctly.
+    // Types converted when dragged in from a website. Static pictures are left
+    // to WhatsApp, which already handles them.
     const ANIMATED_TYPES = /^(image\/gif|video\/(mp4|webm|quicktime))$/i;
 
+    // The file entries of a drag, ignoring text entries such as the address.
     const fileItems = (dataTransfer) =>
         [...((dataTransfer && dataTransfer.items) || [])].filter(
             (item) => item.kind === "file"
         );
 
-    // Type names in dataTransfer.types are lower-cased by the browser.
+    // Entry names of a drag. The browser reports these lower-cased.
     const dragTypes = (dataTransfer) =>
         [...((dataTransfer && dataTransfer.types) || [])].map((type) => type.toLowerCase());
 
-    // "take"  — ours: the drag is swallowed so WhatsApp never sees it, which
-    //           is what keeps its drop panel from opening and then sticking
-    //           once the drop is taken away from it.
-    // "allow" — not ours, but the drop is permitted anyway so the browser
-    //           doesn't navigate away from the chat.
-    // "no"    — nothing to do with us.
+    // Decides what to do with a drag:
+    //   take  handle it here and hide it from WhatsApp
+    //   allow leave it to WhatsApp, but permit the drop so the browser does
+    //         not navigate away to the dragged address
+    //   no    ignore it
     function classifyDrag(dataTransfer) {
         if (!whatsappReady || isConverting) return "no";
 
@@ -373,25 +383,25 @@
         const hasWebAddress = dragTypes(dataTransfer).includes("text/uri-list");
 
         if (files.length) {
-            // Files dragged off the computer report their type immediately.
+            // Local files, so the type is already known.
             if (files.every((item) => item.type === "image/gif")) return "take";
 
-            // A picture dragged out of another website hides its type until
-            // the drop, so there is no way to check it first. It gets taken
-            // either way; anything that turns out not to be convertible is
-            // handed to WhatsApp by pasting it into the message box.
+            // From a website. The type is hidden until the drop, so it is
+            // taken either way. Anything that turns out not to be convertible
+            // is pasted into the message box instead. Letting WhatsApp see the
+            // drag is not an option: its drop panel would open and then stay
+            // stuck once the drop is taken.
             if (hasWebAddress && files.some((item) => !item.type)) return "take";
 
-            return "no"; // ordinary files: WhatsApp's job
+            return "no"; // ordinary files are WhatsApp's job
         }
 
-        // A bare link with nothing attached is left entirely to WhatsApp.
+        // A link on its own, with no file attached.
         return hasWebAddress ? "allow" : "no";
     }
 
-    // Whether a drop came off a web page rather than the computer. Readable
-    // only during drop; a drag in progress exposes nothing but type names.
-    // Local drags carry either no address at all or file:// paths.
+    // True when a drop came off a web page rather than the computer. Only
+    // readable during the drop. Local drags carry no address, or a file:// one.
     function droppedFromWebsite(dataTransfer) {
         let uriList = "";
         try {
@@ -399,7 +409,7 @@
         } catch {
             return false;
         }
-        // A uri-list may hold several lines; comment lines start with '#'.
+        // The list may hold several lines. Comment lines start with '#'.
         const url = uriList
             .split("\n")
             .map((line) => line.trim())
@@ -408,6 +418,7 @@
         return /^https?:\/\//i.test(url);
     }
 
+    // True when a dropped file is a format worth converting.
     const isAnimatedMedia = (file) =>
         ANIMATED_TYPES.test(file.type || "") ||
         (!file.type && MEDIA_EXTENSIONS.test(file.name || ""));
@@ -416,8 +427,8 @@
 
     function showDropOverlay() {
         dropOverlay.classList.add("show");
-        // dragleave is unreliable when the cursor leaves the window, so the
-        // overlay also hides itself when dragover events stop arriving.
+        // dragleave is unreliable at the edge of the window, so the overlay
+        // also hides itself once dragover events stop arriving.
         clearTimeout(overlayTimer);
         overlayTimer = setTimeout(hideDropOverlay, 400);
     }
@@ -428,10 +439,10 @@
         dropOverlay.classList.remove("show");
     }
 
-    // Whether the drag currently in progress was swallowed. This has to be
-    // remembered rather than worked out again at the drop: a file's type only
-    // becomes visible once it lands, so the very same drag would be judged
-    // differently a second time.
+    // Whether the drag in progress was hidden from WhatsApp. Recorded during
+    // the drag rather than worked out again at the drop, because a file's type
+    // is not readable until it lands and the same drag would classify
+    // differently there.
     let dragWasTaken = false;
 
     for (const eventType of ["dragenter", "dragover"]) {
@@ -444,7 +455,7 @@
                 return;
             }
 
-            event.preventDefault(); // required for the drop to be allowed
+            event.preventDefault(); // required before a drop is allowed
 
             if (verdict === "take") {
                 event.stopImmediatePropagation(); // WhatsApp never sees this drag
@@ -453,8 +464,6 @@
                 return;
             }
 
-            // A bare link stays WhatsApp's; the drop is still permitted so the
-            // browser doesn't navigate away from the chat.
             hideDropOverlay();
         }, true);
     }
@@ -462,8 +471,7 @@
     window.addEventListener("drop", (event) => {
         hideDropOverlay();
 
-        // Only drags that were swallowed during dragover are dealt with here;
-        // anything else already belongs to WhatsApp.
+        // Only drags hidden from WhatsApp during dragover are handled here.
         const taken = dragWasTaken;
         dragWasTaken = false;
         if (!taken) return;
@@ -474,23 +482,21 @@
         const files = [...event.dataTransfer.files];
         if (!files.length) return;
 
-        // The drop is the first moment every file's type is known.
+        // Every file's type is readable now.
         const fromWebsite = droppedFromWebsite(event.dataTransfer);
         const convertible = fromWebsite
-            ? files.filter(isAnimatedMedia)                      // from a website
-            : files.filter((file) => file.type === "image/gif"); // off the computer
+            ? files.filter(isAnimatedMedia)
+            : files.filter((file) => file.type === "image/gif");
 
-        // Mixed drops are handed over whole, so dragging a GIF alongside other
+        // Mixed drops are passed on whole, so dragging a GIF alongside other
         // files behaves as it would without the extension.
         if (convertible.length === files.length) {
-            panel.classList.add("open"); // progress must be visible uninvited
+            panel.classList.add("open"); // progress needs to be visible
             convertAndStage(convertible);
             return;
         }
 
-        // Not something this extension converts — an ordinary photo, say. The
-        // drag was swallowed to keep WhatsApp's drop panel shut, so hand the
-        // files over the one way that still works: paste them.
+        // Not a format this extension converts, such as an ordinary photo.
         if (!pasteIntoMessageBox(files)) {
             panel.classList.add("open");
             setStatus("Couldn't pass that to WhatsApp — open a chat first");
@@ -498,7 +504,7 @@
     }, true);
 
     window.addEventListener("dragleave", (event) => {
-        // relatedTarget is null when the cursor leaves the window entirely
+        // relatedTarget is null when the cursor leaves the window entirely.
         if (!event.relatedTarget) hideDropOverlay();
     }, true);
 

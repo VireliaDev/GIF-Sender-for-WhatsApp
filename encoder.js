@@ -1,33 +1,34 @@
 // Converts an animated image (GIF, WebP, APNG) or a short video into the MP4
-// format WhatsApp uses for GIFs: H.264, silent, small, and short.
+// format WhatsApp uses for GIFs: H.264, silent, small and short.
 //
-// Runs as a content script instead of a Web Worker because WhatsApp Web's
-// Content-Security-Policy (worker-src 'self' blob: data:) blocks workers
-// loaded from extension URLs. Decoding and encoding still happen off the main
-// thread inside WebCodecs, and the loop yields between frames, so the page
-// stays responsive.
+// Runs as a content script rather than a Web Worker because WhatsApp's CSP
+// (worker-src 'self' blob: data:) blocks workers loaded from extension URLs.
+// WebCodecs still does the decoding and encoding off the main thread, and the
+// loop yields between frames, so the page stays responsive.
 //
-// Provides __waGifEncode(file, { onProgress, shouldCancel }) -> { buffer, name }.
-// Uses the Muxer from vendor/mp4-muxer.js (exposed as __waGifMp4).
+// Exposes __waGifEncode(file, { onProgress, shouldCancel }) -> { buffer, name }.
+// Uses the muxer from vendor/mp4-muxer.js, which is exposed as __waGifMp4.
 
 (() => {
   if (globalThis.__waGifEncode) return;
 
-  // Transparent pixels are painted onto this color; MP4 video has no alpha.
+  // --- Output limits ---
+
+  // Transparent pixels are drawn onto this colour, as MP4 has no alpha.
   const BACKGROUND_COLOR = "#ffffff";
 
-  const MAX_EDGE_PX = 640;            // longest output side
-  const MIN_EDGE_PX = 16;             // H.264 encoders refuse frames below 16px
-  const MAX_DURATION_US = 10_000_000; // 10s, matching WhatsApp's own GIF limit
+  const MAX_EDGE_PX = 640;            // longest side of the output
+  const MIN_EDGE_PX = 16;             // H.264 encoders reject anything smaller
+  const MAX_DURATION_US = 10_000_000; // 10s, the same limit WhatsApp uses
   const MAX_FRAMES = 600;
   const KEYFRAME_INTERVAL_US = 2_000_000;
 
-  // GIF frame delays of 0 or 1 hundredths mean "as fast as possible"; players
-  // universally treat that as 100ms.
+  // A GIF delay of 0 or 1 hundredths means "as fast as possible". Players
+  // treat that as 100ms.
   const MIN_FRAME_US = 10_000;
   const DEFAULT_FRAME_US = 100_000;
 
-  // Videos are resampled at a fixed rate because they are read by seeking.
+  // Videos are read by seeking, so they are resampled at a fixed rate.
   const VIDEO_FPS = 20;
 
   const H264_CODEC = "avc1.42E01F";   // baseline profile, widest device support
@@ -35,9 +36,10 @@
   const MIN_BITRATE = 300_000;
   const MAX_BITRATE = 4_000_000;
 
-  // Encoder queue depth before the loop pauses to let it catch up.
+  // How many frames may sit in the encoder queue before the loop waits.
   const ENCODER_QUEUE_LIMIT = 8;
 
+  // code is used by content.js to tell the failures apart.
   class EncodeError extends Error {
     constructor(code, message) {
       super(message);
@@ -45,9 +47,10 @@
     }
   }
 
-  // -------------------------------------------------------- type detection ----
-  // Detects the real file type from magic bytes; file.type from the OS is
-  // often empty or wrong.
+  // --- File type ---
+
+  // Reads the real type from the file's magic bytes. The type reported by the
+  // operating system is often missing or wrong.
   function detectType(bytes) {
     const ascii = (offset, length) =>
       String.fromCharCode(...bytes.subarray(offset, offset + length));
@@ -81,9 +84,9 @@
     return "";
   }
 
-  // An animated PNG carries an acTL chunk before the first IDAT.
+  // An animated PNG has an acTL chunk before the first IDAT.
   function isAnimatedPng(bytes) {
-    let offset = 8; // skip PNG signature
+    let offset = 8; // skip the PNG signature
     while (offset + 8 <= bytes.length) {
       const length =
         (bytes[offset] << 24) | (bytes[offset + 1] << 16) |
@@ -97,11 +100,12 @@
     return false;
   }
 
-  // --------------------------------------------------------- MP4 inspection ----
-  // Reads an MP4's box tree to find its tracks, size, and duration. An MP4 may
-  // only skip conversion once this proves it is already silent and in bounds —
-  // an audio track would otherwise survive into WhatsApp, where GIFs must be
-  // silent.
+  // --- MP4 inspection ---
+
+  // Walks an MP4's box tree for its tracks, size and duration. An MP4 is only
+  // allowed to skip conversion once this proves it is already silent and
+  // within the limits, otherwise an audio track would reach WhatsApp, where a
+  // GIF has to be silent.
   function readMp4Info(bytes) {
     const CONTAINER_BOXES = new Set([
       "moov", "trak", "mdia", "minf", "stbl", "edts", "udta",
@@ -123,12 +127,12 @@
         let headerSize = 8;
 
         if (size === 1) {
-          // 64-bit box size
+          // 64-bit size, stored after the box name
           if (offset + 16 > end) return;
           size = view.getUint32(offset + 8) * 4294967296 + view.getUint32(offset + 12);
           headerSize = 16;
         } else if (size === 0) {
-          size = end - offset; // box runs to end of file
+          size = end - offset; // box runs to the end of the file
         }
         if (size < headerSize || offset + size > end) return; // truncated
 
@@ -148,7 +152,7 @@
             if (timescale) info.durationSec = duration / timescale;
           }
         } else if (type === "tkhd" && bodyEnd - 8 >= body) {
-          // width and height are the trailing pair of 16.16 fixed-point values
+          // width and height are the last two 16.16 fixed-point values
           currentTrackSize = {
             width: Math.round(view.getUint32(bodyEnd - 8) / 65536),
             height: Math.round(view.getUint32(bodyEnd - 4) / 65536),
@@ -176,12 +180,12 @@
     try {
       walk(0, bytes.byteLength);
     } catch {
-      return null; // malformed — force the conversion path
+      return null; // malformed, so fall back to converting it
     }
     return info;
   }
 
-  // True when an MP4 already meets every rule conversion would enforce.
+  // True when an MP4 already meets every rule conversion would apply.
   function isSafeToPassThrough(info) {
     return !!info
       && info.hasVideo
@@ -193,9 +197,10 @@
       && info.durationSec <= MAX_DURATION_US / 1_000_000 + 0.05;
   }
 
-  // ---------------------------------------------------------------- helpers ----
+  // --- Helpers ---
+
   // Scales to fit MAX_EDGE_PX. H.264 needs even dimensions, and encoders
-  // refuse frames smaller than 16px, so tiny inputs get upscaled to the floor.
+  // reject frames under 16px, so very small inputs are scaled up to the floor.
   function getOutputSize(sourceWidth, sourceHeight) {
     const scale = Math.min(1, MAX_EDGE_PX / Math.max(sourceWidth, sourceHeight));
     const clamp = (n) => Math.max(MIN_EDGE_PX, Math.floor(n * scale / 2) * 2);
@@ -212,11 +217,13 @@
     return Math.round(Math.min(MAX_BITRATE, Math.max(MIN_BITRATE, raw)));
   }
 
-  // Hands the main thread back between frames so WhatsApp keeps painting.
+  // Gives the main thread a turn so the page keeps redrawing.
   const yieldToPage = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  // --------------------------------------------------------------- pipeline ----
-  // Shared by both input paths: takes painted canvases in, produces an MP4.
+  // --- Encoder ---
+
+  // Sets up the encoder and muxer. Both input paths feed painted canvases in
+  // through addFrame and get the finished MP4 back from finish.
   async function createEncoderPipeline(width, height, fps) {
     const { Muxer, ArrayBufferTarget } = globalThis.__waGifMp4 || {};
     if (!Muxer) throw new EncodeError("internal", "muxer failed to load");
@@ -239,7 +246,7 @@
     const muxer = new Muxer({
       target: new ArrayBufferTarget(),
       video: { codec: "avc", width, height },
-      fastStart: "in-memory", // metadata first, so the clip plays immediately
+      fastStart: "in-memory", // metadata first, so the clip plays right away
     });
 
     let encoderError = null;
@@ -251,8 +258,8 @@
 
     let lastKeyframeTimestamp = -Infinity;
 
-    // Pauses when the encoder queue backs up, so a long clip can't pile
-    // hundreds of raw frames into memory.
+    // Waits for the encoder to catch up, so a long clip cannot pile hundreds
+    // of raw frames into memory.
     function waitForQueueSpace() {
       if (encoder.encodeQueueSize <= ENCODER_QUEUE_LIMIT) return Promise.resolve();
       return new Promise((resolve) => {
@@ -295,7 +302,9 @@
     };
   }
 
-  // --------------------------------------------------- animated image input ----
+  // --- Animated images ---
+
+  // Decodes each frame with ImageDecoder and re-encodes it as video.
   async function convertAnimatedImage(bytes, mimeType, opts) {
     const decoder = new ImageDecoder({ data: bytes, type: mimeType });
     await decoder.tracks.ready;
@@ -311,13 +320,14 @@
       throw new EncodeError("static", "that image isn't animated");
     }
 
-    // The first frame decides the output size and the frame-rate estimate.
+    // The first frame sets the output size and the frame rate estimate.
     const firstFrame = (await decoder.decode({ frameIndex: 0 })).image;
     const { width, height } = getOutputSize(firstFrame.displayWidth, firstFrame.displayHeight);
     const firstDuration = normalizeFrameDuration(firstFrame.duration);
     const fps = Math.min(50, Math.max(1, 1_000_000 / firstDuration));
 
-    // Cap the frame count so progress reflects what will actually be encoded.
+    // Apply the duration limit here too, so progress counts the frames that
+    // will actually be encoded.
     const totalFrames = Math.min(
       track.frameCount,
       MAX_FRAMES,
@@ -325,7 +335,7 @@
     );
 
     let pipeline = null;
-    let undrawnFrame = firstFrame; // closed in finally if the loop bails early
+    let undrawnFrame = firstFrame; // closed in the finally if the loop exits early
 
     try {
       pipeline = await createEncoderPipeline(width, height, fps);
@@ -345,7 +355,7 @@
           try {
             undrawnFrame = (await decoder.decode({ frameIndex: i })).image;
           } catch {
-            break; // frameCount can overshoot what's actually decodable
+            break; // frameCount can be higher than what actually decodes
           }
         }
         const image = undrawnFrame;
@@ -380,10 +390,11 @@
     }
   }
 
-  // ------------------------------------------------------------ video input ----
-  // Reads a video by seeking a detached <video> element and painting each
-  // sample onto a canvas. Only video frames are ever read, so any audio track
-  // is dropped as a side effect — WhatsApp GIFs must be silent.
+  // --- Video ---
+
+  // Reads a video by seeking a detached <video> element and drawing each
+  // sample onto a canvas. Only the picture is read, so any audio track is
+  // dropped along the way, which is what WhatsApp needs for a GIF.
   async function convertVideo(bytes, mimeType, opts) {
     const url = URL.createObjectURL(new Blob([bytes], { type: mimeType || "video/mp4" }));
     const video = document.createElement("video");
@@ -438,7 +449,7 @@
         };
         video.addEventListener("seeked", done);
         video.currentTime = timeSec;
-        setTimeout(done, 3000); // don't hang on a seek that never completes
+        setTimeout(done, 3000); // don't hang on a seek that never lands
       });
 
       for (let i = 0; i < totalFrames; i++) {
@@ -470,7 +481,9 @@
     }
   }
 
-  // ------------------------------------------------------------------ entry ----
+  // --- Entry point ---
+
+  // Picks the right path for the file and returns the finished MP4.
   globalThis.__waGifEncode = async function (file, opts) {
     opts = opts || {};
 
@@ -485,6 +498,7 @@
     const outputName = (file.name || "clip").replace(/\.[^.]+$/, "") + ".mp4";
 
     if (mimeType.startsWith("video/")) {
+      // An MP4 that already meets every limit is passed through untouched.
       if (mimeType === "video/mp4" && isSafeToPassThrough(readMp4Info(bytes))) {
         if (opts.onProgress) opts.onProgress("mux", 1, 1);
         return { buffer: bytes.buffer, name: outputName };

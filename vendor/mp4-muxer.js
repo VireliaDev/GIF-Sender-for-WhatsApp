@@ -1685,11 +1685,10 @@ ensureNotFinalized_fn = function() {
     throw new Error("Cannot add new video or audio chunks after the file has been finalized.");
   }
 };
-// LOCAL EDIT (wa-gif): upstream ships this as an ES module, but WhatsApp Web's
-// CSP (`worker-src 'self' blob: data:`) blocks extension-URL workers, so the
-// encoder runs as a plain content script in the isolated world instead. Classic
-// scripts can't use `export`, so the module's exports are published on a
-// namespaced global. Nothing above this line is modified.
+// LOCAL EDIT: upstream ships this as an ES module. The encoder has to run as
+// a plain content script (see encoder.js), and a classic script cannot use
+// export, so the exports are published on a global instead. The original
+// export block was the only thing changed; everything above is untouched.
 globalThis.__waGifMp4 = {
   ArrayBufferTarget,
   Muxer
